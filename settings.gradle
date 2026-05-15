@@ -1,0 +1,150 @@
+package com.raidminer.helper.obs;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.raidminer.helper.RaidMinerHelperClient;
+import com.raidminer.helper.config.ModConfig;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Base64;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Минимальный клиент obs-websocket v5 без сторонних библиотек.
+ * Поддерживает только StartRecord и StopRecord, чтобы не тащить лишние зависимости в мод.
+ */
+public final class ObsWebSocketClient {
+    private static final Gson GSON = new Gson();
+    private final ModConfig config;
+
+    public ObsWebSocketClient(ModConfig config) {
+        this.config = config;
+    }
+
+    public CompletableFuture<Boolean> startRecording() {
+        return request("StartRecord");
+    }
+
+    public CompletableFuture<Boolean> stopRecording() {
+        return request("StopRecord");
+    }
+
+    private CompletableFuture<Boolean> request(String requestType) {
+        if (!config.obsEnabled) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                ObsListener listener = new ObsListener(config, requestType);
+                URI uri = URI.create("ws://" + config.obsHost + ":" + config.obsPort);
+                WebSocket socket = HttpClient.newHttpClient().newWebSocketBuilder()
+                        .buildAsync(uri, listener)
+                        .get(3, TimeUnit.SECONDS);
+                listener.setSocket(socket);
+                boolean result = listener.await(8, TimeUnit.SECONDS);
+                try {
+                    socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(1, TimeUnit.SECONDS);
+                } catch (Exception ignored) {
+                }
+                return result;
+            } catch (Exception e) {
+                RaidMinerHelperClient.LOGGER.warn("OBS websocket request failed: {}", requestType, e);
+                return false;
+            }
+        });
+    }
+
+    private static final class ObsListener implements WebSocket.Listener {
+        private final ModConfig config;
+        private final String requestType;
+        private final StringBuilder buffer = new StringBuilder();
+        private final CountDownLatch done = new CountDownLatch(1);
+        private volatile boolean ok;
+        private WebSocket socket;
+
+        private ObsListener(ModConfig config, String requestType) {
+            this.config = config;
+            this.requestType = requestType;
+        }
+
+        void setSocket(WebSocket socket) {
+            this.socket = socket;
+        }
+
+        boolean await(long time, TimeUnit unit) throws InterruptedException {
+            done.await(time, unit);
+            return ok;
+        }
+
+        @Override
+        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+            buffer.append(data);
+            if (last) {
+                String message = buffer.toString();
+                buffer.setLength(0);
+                handle(message);
+            }
+            webSocket.request(1);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        private void handle(String raw) {
+            try {
+                JsonObject json = GSON.fromJson(raw, JsonObject.class);
+                int op = json.get("op").getAsInt();
+                JsonObject d = json.has("d") && json.get("d").isJsonObject() ? json.getAsJsonObject("d") : new JsonObject();
+
+                if (op == 0) { // Hello
+                    JsonObject identify = new JsonObject();
+                    identify.addProperty("op", 1);
+                    JsonObject body = new JsonObject();
+                    body.addProperty("rpcVersion", 1);
+                    if (d.has("authentication") && !config.obsPassword.isBlank()) {
+                        JsonObject auth = d.getAsJsonObject("authentication");
+                        body.addProperty("authentication", buildAuth(config.obsPassword, auth.get("salt").getAsString(), auth.get("challenge").getAsString()));
+                    }
+                    identify.add("d", body);
+                    socket.sendText(GSON.toJson(identify), true);
+                    return;
+                }
+
+                if (op == 2) { // Identified
+                    JsonObject request = new JsonObject();
+                    request.addProperty("op", 6);
+                    JsonObject body = new JsonObject();
+                    body.addProperty("requestType", requestType);
+                    body.addProperty("requestId", UUID.randomUUID().toString());
+                    request.add("d", body);
+                    socket.sendText(GSON.toJson(request), true);
+                    return;
+                }
+
+                if (op == 7) { // RequestResponse
+                    JsonObject status = d.getAsJsonObject("requestStatus");
+                    ok = status != null && status.has("result") && status.get("result").getAsBoolean();
+                    done.countDown();
+                }
+            } catch (Exception e) {
+                RaidMinerHelperClient.LOGGER.warn("Cannot parse OBS websocket message: {}", raw, e);
+                ok = false;
+                done.countDown();
+            }
+        }
+
+        private static String buildAuth(String password, String salt, String challenge) throws Exception {
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] secret = sha256.digest((password + salt).getBytes(StandardCharsets.UTF_8));
+            String secret64 = Base64.getEncoder().encodeToString(secret);
+            byte[] auth = sha256.digest((secret64 + challenge).getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(auth);
+        }
+    }
+}

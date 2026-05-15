@@ -1,0 +1,104 @@
+package com.raidminer.helper.util;
+
+import net.minecraft.text.Style;
+
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** Парсер ника с учётом рангов, префиксов и мусорных символов. */
+public final class NickParser {
+    private static final Pattern COLOR_CODES = Pattern.compile("§[0-9A-FK-ORa-fk-or]|&[0-9A-FK-ORa-fk-or]");
+    private static final Pattern MC_NICK = Pattern.compile("^[A-Za-z0-9_]{3,16}$");
+    private static final Pattern MC_NICK_ANYWHERE = Pattern.compile("[A-Za-z0-9_]{3,16}");
+
+    private static final Set<String> IGNORED_PREFIXES = Set.of(
+            "HT5", "LT5", "HT4", "LT4", "HT3", "LT3", "HT2", "LT2", "HT1", "LT1",
+            "RHT3", "RLT3", "RHT2", "RLT2", "RHT1", "RLT1",
+            "XHT5", "XLT5", "XHT4", "XLT4", "XHT3", "XLT3", "XHT2", "XLT2", "XHT1", "XLT1",
+            "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"
+    );
+
+    private static final Set<String> SERVER_WORDS = Set.of(
+            "anarchy-alpha", "anarchy-beta", "anarchy-gamma", "anarchy-new", "duels"
+    );
+
+    private NickParser() {}
+
+    public static Optional<String> findNickFromStyle(Style style) {
+        if (style == null) {
+            return Optional.empty();
+        }
+        if (style.getInsertion() != null) {
+            Optional<String> fromInsertion = findNick(style.getInsertion());
+            if (fromInsertion.isPresent()) {
+                return fromInsertion;
+            }
+        }
+        if (style.getClickEvent() != null) {
+            Optional<String> fromClick = findNick(style.getClickEvent().toString());
+            if (fromClick.isPresent()) {
+                return fromClick;
+            }
+        }
+        if (style.getHoverEvent() != null) {
+            return findNick(style.getHoverEvent().toString());
+        }
+        return Optional.empty();
+    }
+
+    public static Optional<String> findNick(String rawMessage) {
+        if (rawMessage == null || rawMessage.isBlank()) {
+            return Optional.empty();
+        }
+        String normalized = COLOR_CODES.matcher(rawMessage).replaceAll(" ")
+                .replace('ё', 'е')
+                .replaceAll("[\\[\\](){ }<>]", " ")
+                .replaceAll("[→»«|:;,.!?\\\\/]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        String[] tokens = normalized.split(" ");
+        boolean nextAfterServerWord = false;
+
+        for (String token : tokens) {
+            String cleaned = cleanToken(token);
+            if (cleaned.isBlank()) {
+                continue;
+            }
+            String upper = cleaned.toUpperCase(Locale.ROOT);
+            String lower = cleaned.toLowerCase(Locale.ROOT);
+
+            if (SERVER_WORDS.contains(lower)) {
+                nextAfterServerWord = true;
+                continue;
+            }
+            if (IGNORED_PREFIXES.contains(upper)) {
+                continue;
+            }
+            if (isNick(cleaned)) {
+                return Optional.of(cleaned);
+            }
+            if (nextAfterServerWord) {
+                Matcher matcher = MC_NICK_ANYWHERE.matcher(cleaned);
+                if (matcher.find()) {
+                    return Optional.of(matcher.group());
+                }
+            }
+            nextAfterServerWord = false;
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isNick(String token) {
+        return MC_NICK.matcher(token).matches();
+    }
+
+    private static String cleanToken(String token) {
+        return token == null ? "" : token
+                .replaceAll("^[^A-Za-z0-9_]+", "")
+                .replaceAll("[^A-Za-z0-9_]+$", "");
+    }
+}

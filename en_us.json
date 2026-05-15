@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "raidminer_helper_gui",
+  "version": "${version}",
+  "name": "RaidMiner Helper Gui (Labymod)",
+  "description": "Client-side moderator GUI helper for RaidMiner/LabyMod Fabric.",
+  "authors": ["RaidMiner"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.raidminer.helper.RaidMinerHelperClient"
+    ]
+  },
+  "mixins": [
+    "raidminer_helper_gui.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "fabric-api": ">=${fabric_version}",
+    "java": ">=21"
+  }
+}
